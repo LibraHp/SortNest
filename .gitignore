@@ -1,0 +1,15 @@
+node_modules/
+.npm-cache/
+dist/
+release/
+src-tauri/target/
+.venv/
+.conda/
+.cache/
+__pycache__/
+*.log
+*.sqlite*
+.env*
+WeMM-Embedding-2B/
+artifacts/
+*.tsbuildinfo

@@ -1,0 +1,15 @@
+name: sortnest
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - torch>=2.10
+      - torchvision>=0.25
+      - transformers==5.2.0
+      - qwen-vl-utils==0.0.14
+      - accelerate>=1.1
+      - fastapi>=0.115
+      - uvicorn>=0.30
+      - pillow>=11
