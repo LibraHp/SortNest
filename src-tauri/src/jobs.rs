@@ -145,6 +145,24 @@ fn launch(core: Arc<Core>, id: String, control: Arc<AtomicU8>) {
         }
     });
 }
+pub fn clear_history(core: &Core, target: &str) -> Result<Value> {
+    let mut db = core.db()?;
+    let tx = db.transaction()?;
+    match target {
+        "jobs" => {
+            tx.execute(
+                "DELETE FROM jobs WHERE status NOT IN ('running','paused','queued')",
+                [],
+            )?;
+        }
+        "errors" => {
+            tx.execute("DELETE FROM errors", [])?;
+        }
+        _ => bail!("未知清理范围"),
+    }
+    tx.commit()?;
+    Ok(json!(true))
+}
 pub fn control(core: &Arc<Core>, id: &str, action: &str) -> Result<Value> {
     let mut controls = core.controls.lock().unwrap();
     let db = core.db()?;
@@ -403,4 +421,51 @@ fn analyze(core: &Core, job: &str, task: &str, control: &AtomicU8) -> Result<()>
         [job],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Core;
+
+    #[test]
+    fn clear_history_keeps_active_jobs_until_errors_are_cleared() {
+        let root = tempfile::tempdir().unwrap();
+        let core = Core::new(root.path().join("db")).unwrap();
+        let db = core.db().unwrap();
+        db.execute(
+            "INSERT INTO jobs(id,kind,status) VALUES('done','scan','completed'),('live','scan','running')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO errors(job_id,path,message) VALUES('done','a','旧错误'),('live','b','仍在跑')",
+            [],
+        )
+        .unwrap();
+        clear_history(&core, "jobs").unwrap();
+        let db = core.db().unwrap();
+        let jobs: i64 = db
+            .query_row("SELECT count(*) FROM jobs", [], |r| r.get(0))
+            .unwrap();
+        let status: String = db
+            .query_row("SELECT status FROM jobs", [], |r| r.get(0))
+            .unwrap();
+        let errors: i64 = db
+            .query_row("SELECT count(*) FROM errors", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(jobs, 1);
+        assert_eq!(status, "running");
+        assert_eq!(errors, 1);
+        clear_history(&core, "errors").unwrap();
+        let db = core.db().unwrap();
+        let errors: i64 = db
+            .query_row("SELECT count(*) FROM errors", [], |r| r.get(0))
+            .unwrap();
+        let jobs: i64 = db
+            .query_row("SELECT count(*) FROM jobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(errors, 0);
+        assert_eq!(jobs, 1);
+    }
 }

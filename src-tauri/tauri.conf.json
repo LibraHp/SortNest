@@ -13,10 +13,11 @@
     "windows": [
       {
         "title": "SortNest · 图片有序，灵感自来",
-        "width": 1360,
-        "height": 900,
-        "minWidth": 900,
-        "minHeight": 640
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 560,
+        "center": true
       }
     ],
     "security": {

@@ -2,7 +2,7 @@
 
 面向 Windows 的本地优先 AI 图片管理应用。Tauri 2 + Rust + React + TypeScript + SQLite。
 
-界面使用 Ant Design 6，包含中文组件、统一绿色主题、可折叠菜单、表单、下拉选择、弹窗、状态提示和响应式布局。主题配置位于 `src/theme.ts`，布局样式位于 `src/styles.css`。品牌 Logo 已用于侧栏、首页引导、网页图标与 Windows 程序图标；原始图片副本保存在 `public/logo-original.png`。
+界面使用 shadcn/ui（Radix Nova）：可折叠侧栏、表单、下拉选择、对话框、状态提示、图表和响应式布局。组件在 `src/components/ui`，主题变量在 `src/styles.css`。品牌 Logo 已用于侧栏、首页引导、网页图标与 Windows 程序图标；原始图片副本保存在 `public/logo-original.png`。
 
 ## 启动
 

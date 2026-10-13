@@ -54,10 +54,38 @@ async fn command(
     .map_err(|e| e.to_string())?
 }
 
+fn fit_window_to_screen(app: &tauri::App) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        return;
+    };
+    let scale = monitor.scale_factor();
+    if scale <= f64::EPSILON {
+        return;
+    }
+    let area = monitor.work_area().size;
+    let available_width = area.width as f64 / scale;
+    let available_height = area.height as f64 / scale;
+    let max_width = (available_width - 32.0).max(640.0);
+    let max_height = (available_height - 32.0).max(480.0);
+    let width = (available_width * 0.86).clamp(800.0_f64.min(max_width), max_width);
+    let height = (available_height * 0.9).clamp(560.0_f64.min(max_height), max_height);
+    let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
+    let _ = window.center();
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            fit_window_to_screen(app);
             let root = std::env::var_os("SORTNEST_DATA_DIR")
                 .map(PathBuf::from)
                 .unwrap_or(app.path().app_data_dir()?);

@@ -6,6 +6,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use image::{codecs::jpeg::JpegEncoder, ExtendedColorType, ImageEncoder};
 use std::{io::Cursor, path::Path, time::Duration};
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -110,7 +111,7 @@ pub fn validate(m: &Model) -> Result<()> {
 }
 pub fn fingerprint(m: &Model) -> String {
     let value = format!(
-        "sortnest-v1|{}|{}|{}|{}",
+        "sortnest-v2|{}|{}|{}|{}|jpeg75-edge256",
         m.provider,
         m.base_url.trim_end_matches('/'),
         m.model,
@@ -190,7 +191,16 @@ pub fn load(core: &Core, id: &str) -> Result<Model> {
         .context("模型配置不存在")?;
     r["remote_consent"] = json!(r["remote_consent"].as_i64() == Some(1));
     r["capabilities"] = serde_json::from_str(r["capabilities"].as_str().unwrap_or("{}"))?;
-    Ok(serde_json::from_value(r)?)
+    let mut model: Model = serde_json::from_value(r)?;
+    let current = fingerprint(&model);
+    if model.fingerprint != current {
+        db.execute(
+            "UPDATE models SET fingerprint=? WHERE id=?",
+            params![current, model.id],
+        )?;
+        model.fingerprint = current;
+    }
+    Ok(model)
 }
 pub fn assigned(core: &Core, task: &str) -> Result<Model> {
     let id: Option<String> = core
@@ -291,11 +301,29 @@ impl HttpProvider {
         Ok(())
     }
 }
+const MODEL_IMAGE_EDGE: u32 = 256;
+const MODEL_JPEG_QUALITY: u8 = 75;
+
+pub fn compress_for_model(image: image::DynamicImage) -> Result<Vec<u8>> {
+    let (width, height) = (image.width(), image.height());
+    let fitted = if width <= MODEL_IMAGE_EDGE && height <= MODEL_IMAGE_EDGE {
+        image
+    } else {
+        image.thumbnail(MODEL_IMAGE_EDGE, MODEL_IMAGE_EDGE)
+    };
+    let rgb = fitted.to_rgb8();
+    let mut encoded = Cursor::new(Vec::new());
+    JpegEncoder::new_with_quality(&mut encoded, MODEL_JPEG_QUALITY).write_image(
+        rgb.as_raw(),
+        rgb.width(),
+        rgb.height(),
+        ExtendedColorType::Rgb8,
+    )?;
+    Ok(encoded.into_inner())
+}
+
 pub fn image_base64(path: &Path) -> Result<String> {
-    let img = scanner::decode(path)?.thumbnail(1024, 1024).to_rgb8();
-    let mut out = Cursor::new(Vec::new());
-    img.write_to(&mut out, image::ImageFormat::Jpeg)?;
-    Ok(STANDARD.encode(out.into_inner()))
+    Ok(STANDARD.encode(compress_for_model(scanner::decode(path)?)?))
 }
 pub fn normalize(mut v: Vec<f32>) -> Result<Vec<f32>> {
     if v.is_empty() || v.len() > 65536 || v.iter().any(|x| !x.is_finite()) {
@@ -572,6 +600,19 @@ pub fn cosine(a: &[f32], b: &[f32]) -> Result<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn model_input_is_a_compressed_jpeg_within_256_pixels() {
+        let source = image::RgbImage::from_fn(2000, 1000, |x, _| image::Rgb([(x % 256) as u8, 40, 80]));
+        let encoded = compress_for_model(image::DynamicImage::ImageRgb8(source)).unwrap();
+        let decoded = image::ImageReader::new(Cursor::new(&encoded))
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .unwrap();
+        assert!(decoded.width() <= 256 && decoded.height() <= 256);
+        assert!(decoded.width() > decoded.height());
+        assert!(encoded.len() < 200_000);
+    }
     #[test]
     fn chat_response_accepts_text_blocks_but_never_reasoning_as_answer() {
         assert_eq!(

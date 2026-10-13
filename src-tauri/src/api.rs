@@ -39,6 +39,7 @@ pub fn dispatch(
         "jobs"=>Ok(json!({"items":db::rows(&core.db()?,"SELECT j.*,f.path AS folder FROM jobs j LEFT JOIN folders f ON f.id=j.folder_id ORDER BY j.created_at DESC,j.rowid DESC LIMIT 30",[])?,"errors":db::rows(&core.db()?,"SELECT * FROM errors ORDER BY id DESC LIMIT 100",[])?})),
         "job_start"=>jobs::start(core,&a),
         "job_control"=>jobs::control(core,text(&a,"id")?,text(&a,"action")?),
+        "history_clear"=>jobs::clear_history(core,text(&a,"target")?),
         "models"=>{
             let db=core.db()?;let mut items=db::rows(&db,"SELECT m.*,(SELECT count(*) FROM embeddings e WHERE e.model_id=m.id) AS index_count,(SELECT count(*) FROM embeddings e WHERE e.model_id=m.id AND e.fingerprint<>m.fingerprint) AS stale_count FROM models m ORDER BY name",[])?;
             for m in &mut items{m["capabilities"]=serde_json::from_str(m["capabilities"].as_str().unwrap_or("{}"))?;m["has_key"]=json!(models::credential(m["id"].as_str().unwrap())?.get_password().is_ok());}

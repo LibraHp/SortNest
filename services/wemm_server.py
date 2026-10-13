@@ -58,7 +58,7 @@ def runtime_config(device: str, quantization: str) -> tuple[str, torch.dtype]:
 def inference_revision(weights_revision: str, device: str, quantization: str, dtype: torch.dtype) -> str:
     if device == "cpu" and quantization == "none":
         return weights_revision  # Preserve the existing CPU index.
-    settings = f"{weights_revision}|cuda-v1|{quantization}|{dtype}|nf4-double|pixels262144"
+    settings = f"{weights_revision}|cuda-v1|{quantization}|{dtype}|nf4-double|pixels65536"
     return hashlib.sha256(settings.encode()).hexdigest()
 
 
@@ -124,7 +124,7 @@ def create_app(model_dir: Path, device: str = "cpu", threads: int = 6, quantizat
                 raw = base64.b64decode(request.image, validate=True)
                 with Image.open(io.BytesIO(raw)) as source:
                     im = ImageOps.exif_transpose(source).convert("RGB")
-                    im.thumbnail((1024, 1024))
+                    im.thumbnail((256, 256))
                 images = [im]
                 content.append({"type": "image", "image": im})
             except Exception as error:
@@ -139,7 +139,13 @@ def create_app(model_dir: Path, device: str = "cpu", threads: int = 6, quantizat
         try:
             messages = [{"role": "user", "content": content}]
             text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-            inputs = processor(text=[text], images=images, return_tensors="pt", max_pixels=262144).to(device)
+            inputs = processor(
+                text=[text],
+                images=images,
+                return_tensors="pt",
+                min_pixels=65536,
+                max_pixels=65536,
+            ).to(device)
             if inputs["input_ids"].shape[-1] > 2048:
                 raise HTTPException(400, "Input exceeds 2048 token limit")
             with torch.inference_mode():

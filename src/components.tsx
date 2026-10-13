@@ -1,9 +1,43 @@
-import { Button, Checkbox } from "./ui";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ImageOff, Inbox, ChevronRight } from "lucide-react";
-import { api, asset, bytes, type ImageItem } from "./api";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Alert, Empty as AntEmpty, Modal as AntModal, Spin } from "antd";
+import { ChevronRight, ImageOff, Inbox, TriangleAlert } from "lucide-react";
+import { api, asset, bytes, type ImageItem } from "./api";
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Spinner } from "@/components/ui/spinner";
+import { cn } from "@/lib/utils";
+
+export const ALL = "all";
+export const NONE = "none";
+export const ROOT = "root";
 
 export function useData<T>(
   operation: string,
@@ -16,7 +50,6 @@ export function useData<T>(
   const key = JSON.stringify(args);
   useEffect(() => {
     let current = true;
-    setLoading(true);
     api<T>(operation, JSON.parse(key))
       .then((v) => {
         if (current) {
@@ -36,41 +69,85 @@ export function useData<T>(
   }, [operation, key, version]);
   return { data, error, loading, setData };
 }
-export function Empty({
+
+export function Choice({
+  label,
+  value,
+  onValueChange,
+  options,
+  className,
+  placeholder = "请选择",
+}: {
+  label?: string;
+  value: string;
+  onValueChange: (value: string) => void;
+  options: { value: string; label: string }[];
+  className?: string;
+  placeholder?: string;
+}) {
+  const current = options.some((option) => option.value === value)
+    ? value
+    : undefined;
+  return (
+    <Select value={current} onValueChange={onValueChange}>
+      <SelectTrigger aria-label={label} className={cn("w-full", className)}>
+        <SelectValue placeholder={placeholder} />
+      </SelectTrigger>
+      <SelectContent>
+        {options.map((option) => (
+          <SelectItem key={option.value} value={option.value}>
+            {option.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+export function EmptyState({
   title = "这里还没有图片",
   children,
-  icon = <Inbox size={35} />,
+  icon = <Inbox />,
 }: {
   title?: string;
   children?: ReactNode;
   icon?: ReactNode;
 }) {
   return (
-    <AntEmpty
-      className="empty"
-      image={<div className="empty-icon">{icon}</div>}
-      description={
-        <>
-          <h3>{title}</h3>
-          <div>{children}</div>
-        </>
-      }
-    />
+    <Empty className="min-h-48 border border-dashed bg-card/60">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">{icon}</EmptyMedia>
+        <EmptyTitle>{title}</EmptyTitle>
+        {typeof children === "string" ? (
+          <EmptyDescription>{children}</EmptyDescription>
+        ) : null}
+      </EmptyHeader>
+      {children && typeof children !== "string" ? (
+        <EmptyContent>{children}</EmptyContent>
+      ) : null}
+    </Empty>
   );
 }
+
 export function ErrorBox({ error }: { error: string }) {
   return error ? (
-    <Alert className="error-box" type="error" showIcon title={error} />
+    <Alert variant="destructive">
+      <TriangleAlert />
+      <AlertTitle>请求没有完成</AlertTitle>
+      <AlertDescription>{error}</AlertDescription>
+    </Alert>
   ) : null;
 }
+
 export function Loading() {
   return (
-    <div className="loading">
-      <Spin size="small" />
+    <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+      <Spinner />
       正在读取本地图片库…
     </div>
   );
 }
+
 export function Modal({
   title,
   children,
@@ -83,19 +160,23 @@ export function Modal({
   wide?: boolean;
 }) {
   return (
-    <AntModal
-      open
-      title={title}
-      onCancel={onClose}
-      footer={null}
-      width={wide ? 1160 : 560}
-      centered
-      className={wide ? "detail-modal" : "form-modal"}
-    >
-      {children}
-    </AntModal>
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent
+        className={
+          wide
+            ? "h-[86vh] max-h-[86vh] w-[92vw] max-w-[92vw] gap-5 overflow-y-auto p-5 sm:max-w-[92vw]"
+            : "max-h-[80vh] w-[min(40rem,90vw)] max-w-[min(40rem,90vw)] gap-5 overflow-y-auto p-5 sm:max-w-[min(40rem,90vw)]"
+        }
+      >
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+        </DialogHeader>
+        {children}
+      </DialogContent>
+    </Dialog>
   );
 }
+
 export function Heading({
   eyebrow,
   title,
@@ -108,16 +189,27 @@ export function Heading({
   actions?: ReactNode;
 }) {
   return (
-    <div className="page-heading">
-      <div>
-        {eyebrow && <div className="eyebrow">{eyebrow}</div>}
-        <h1>{title}</h1>
-        {description && <p>{description}</p>}
+    <div className="flex flex-wrap items-end justify-between gap-6">
+      <div className="max-w-2xl space-y-3">
+        {eyebrow ? (
+          <p className="text-[11px] font-medium tracking-[0.18em] text-primary/80">
+            {eyebrow}
+          </p>
+        ) : null}
+        <h1 className="text-[1.9rem] leading-tight font-semibold tracking-tight">
+          {title}
+        </h1>
+        {description ? (
+          <p className="max-w-xl text-sm leading-7 text-muted-foreground">
+            {description}
+          </p>
+        ) : null}
       </div>
-      <div className="heading-actions">{actions}</div>
+      {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
     </div>
   );
 }
+
 export function ImageGrid({
   items,
   onOpen,
@@ -134,31 +226,31 @@ export function ImageGrid({
   useEffect(() => {
     const el = parent.current;
     if (!el) return;
-    const observer = new ResizeObserver(([e]) =>
-      setCols(Math.max(2, Math.floor(e.contentRect.width / 220))),
-    );
+    const observer = new ResizeObserver(([e]) => {
+      const next = Math.max(2, Math.floor(e.contentRect.width / 260));
+      setCols((current) => (current === next ? current : next));
+    });
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
   const rows = useVirtualizer({
     count: Math.ceil(items.length / cols),
     getScrollElement: () => parent.current,
-    estimateSize: () => 278,
+    estimateSize: () => 348,
     overscan: 3,
   });
   return (
-    <div ref={parent} className="virtual-grid">
+    <div
+      ref={parent}
+      className="h-[calc(100vh-280px)] min-h-[460px] overflow-auto pr-1"
+    >
       <div style={{ height: rows.getTotalSize(), position: "relative" }}>
         {rows.getVirtualItems().map((row) => (
           <div
-            className="grid-row"
             key={row.key}
+            className="absolute top-0 left-0 grid w-full gap-5"
             style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              width: "100%",
-              height: 278,
+              height: 348,
               transform: `translateY(${row.start}px)`,
               gridTemplateColumns: `repeat(${cols},minmax(0,1fr))`,
             }}
@@ -166,12 +258,16 @@ export function ImageGrid({
             {items
               .slice(row.index * cols, (row.index + 1) * cols)
               .map((item) => (
-                <article
+                <Card
                   key={item.id}
-                  className={`image-card ${selected?.has(item.id) ? "selected" : ""}`}
+                  className={cn(
+                    "group relative gap-0 overflow-hidden py-0",
+                    selected?.has(item.id) && "ring-2 ring-primary",
+                  )}
                 >
-                  <button
-                    className="image-open"
+                  <Button
+                    variant="ghost"
+                    className="relative h-52 w-full rounded-none bg-muted p-0 hover:bg-muted"
                     onClick={() => onOpen(item)}
                     aria-label={`查看 ${item.name}`}
                   >
@@ -180,37 +276,50 @@ export function ImageGrid({
                         src={asset(item.thumbnail)}
                         alt={item.name}
                         loading="lazy"
+                        className="size-full object-cover"
                       />
                     ) : (
-                      <ImageOff size={28} />
+                      <ImageOff className="text-muted-foreground" />
                     )}
-                    <span className="format-label">
+                    <Badge className="absolute bottom-2 left-2 border-0 bg-black/60 text-white">
                       {item.extension.toUpperCase()}
-                    </span>
-                    {typeof item.score === "number" && (
-                      <span className="score-label">
+                    </Badge>
+                    {typeof item.score === "number" ? (
+                      <Badge className="absolute right-2 bottom-2 border-0 bg-black/60 text-white">
                         {item.relation === "exact"
                           ? "完全重复"
                           : item.score.toFixed(3)}
-                      </span>
-                    )}
-                  </button>
-                  {onToggle && (
+                      </Badge>
+                    ) : null}
+                  </Button>
+                  {onToggle ? (
                     <Checkbox
-                      className="image-check"
+                      className={cn(
+                        "absolute top-2.5 left-2.5 z-10 border-white bg-white shadow-sm",
+                        !selected?.has(item.id) &&
+                          "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
+                      )}
                       checked={selected?.has(item.id) || false}
-                      onChange={() => onToggle(item.id)}
+                      onCheckedChange={() => onToggle(item.id)}
                       aria-label={`选择 ${item.name}`}
                     />
-                  )}
-                  <button className="image-info" onClick={() => onOpen(item)}>
-                    <strong title={item.name}>{item.name}</strong>
-                    <span>
-                      {item.category ||
-                        `${item.width || "–"} × ${item.height || "–"}`}
+                  ) : null}
+                  <Button
+                    variant="ghost"
+                    className="h-auto w-full flex-col items-start gap-1 rounded-none px-3 py-3 text-left hover:bg-transparent"
+                    onClick={() => onOpen(item)}
+                  >
+                    <strong className="w-full truncate" title={item.name}>
+                      {item.name}
+                    </strong>
+                    <span className="flex w-full justify-between text-xs text-muted-foreground">
+                      <span>
+                        {item.category ||
+                          `${item.width || "–"} × ${item.height || "–"}`}
+                      </span>
                       <span>{bytes(item.size)}</span>
                     </span>
-                    <small>
+                    <small className="line-clamp-1 text-xs text-muted-foreground">
                       {item.tags ||
                         (item.status === "failed"
                           ? "解码失败"
@@ -218,8 +327,8 @@ export function ImageGrid({
                             ? "感知哈希接近 · 需要人工核对"
                             : "尚未添加标签")}
                     </small>
-                  </button>
-                </article>
+                  </Button>
+                </Card>
               ))}
           </div>
         ))}
@@ -227,6 +336,7 @@ export function ImageGrid({
     </div>
   );
 }
+
 export function SectionTitle({
   children,
   action,
@@ -237,17 +347,18 @@ export function SectionTitle({
   onAction?: () => void;
 }) {
   return (
-    <div className="section-title">
-      <h2>{children}</h2>
-      {action && (
-        <Button className="link-button" onClick={onAction}>
+    <div className="flex items-center justify-between gap-3">
+      <h2 className="text-sm font-medium tracking-wide">{children}</h2>
+      {action ? (
+        <Button variant="link" onClick={onAction}>
           {action}
-          <ChevronRight size={16} />
+          <ChevronRight />
         </Button>
-      )}
+      ) : null}
     </div>
   );
 }
+
 export type Run = (
   operation: string,
   args?: Record<string, unknown>,
