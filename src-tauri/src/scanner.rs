@@ -5,13 +5,15 @@ use image::{imageops::FilterType, GenericImageView, ImageDecoder};
 use rusqlite::{params, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     fs::File,
     io::{BufReader, Read},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU8, Ordering},
-        Arc,
+        mpsc, Arc, Mutex,
     },
+    thread,
     time::{Duration, Instant, UNIX_EPOCH},
 };
 use walkdir::WalkDir;
@@ -50,7 +52,7 @@ pub fn supported(path: &Path) -> bool {
 pub fn file_hash(path: &Path) -> Result<String> {
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
+    let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         let n = file.read(&mut buffer)?;
         if n == 0 {
@@ -106,51 +108,74 @@ pub fn checkpoint(control: &AtomicU8) -> bool {
     control.load(Ordering::SeqCst) != 2
 }
 
-pub fn index_file(core: &Core, folder: i64, path: &Path, run: &str) -> Result<bool> {
+#[derive(Clone)]
+struct Existing {
+    id: i64,
+    size: i64,
+    modified: i64,
+    status: String,
+    hash: Option<String>,
+}
+
+enum Prepared {
+    Reused { id: i64 },
+    Indexed {
+        path: String,
+        name: String,
+        extension: String,
+        size: i64,
+        width: u32,
+        height: u32,
+        created: Option<String>,
+        modified: i64,
+        hash: String,
+        phash: String,
+        thumbnail: String,
+        exif: String,
+        previous: Option<(i64, Option<String>)>,
+    },
+}
+
+fn prepare_image(
+    path: &Path,
+    existing: Option<Existing>,
+    cache: &Path,
+    read_exif: bool,
+) -> Result<Prepared> {
     let resolved = std::fs::canonicalize(path)?;
     let path = resolved.as_path();
     let before = std::fs::metadata(path)?;
     let modified = stamp(&before);
     let size = before.len() as i64;
     let path_s = path.to_string_lossy().to_string();
-    let mut db = core.db()?;
-    let old: Option<(i64, i64, i64, String, Option<String>)> = db
-        .query_row(
-            "SELECT id,size,modified,status,hash FROM images WHERE path=?",
-            [&path_s],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )
-        .optional()?;
     // Hash on each scan catches changed content even when timestamps and sizes are preserved.
     let hash = file_hash(path)?;
-    if let Some((id, old_size, old_modified, status, old_hash)) = &old {
-        if *old_size == size
-            && *old_modified == modified
-            && status == "ready"
-            && old_hash.as_deref() == Some(&hash)
-            && core.cache.join(format!("{hash}.jpg")).is_file()
+    if let Some(old) = &existing {
+        if old.size == size
+            && old.modified == modified
+            && old.status == "ready"
+            && old.hash.as_deref() == Some(hash.as_str())
+            && cache.join(format!("{hash}.jpg")).is_file()
         {
-            db.execute(
-                "UPDATE images SET seen_run=?,missing=0 WHERE id=?",
-                params![run, id],
-            )?;
-            return Ok(false);
+            return Ok(Prepared::Reused { id: old.id });
         }
     }
     let image = decode(path)?;
     let (width, height) = image.dimensions();
     let phash = dhash(&image);
-    let thumbnail = core.cache.join(format!("{hash}.jpg"));
+    let thumbnail = cache.join(format!("{hash}.jpg"));
     if !thumbnail.exists() {
-        image.thumbnail(400, 400).to_rgb8().save(&thumbnail)?;
+        let partial = cache.join(format!("{hash}.jpg.partial"));
+        image.thumbnail(400, 400).write_to(
+            &mut File::create(&partial)?,
+            image::ImageFormat::Jpeg,
+        )?;
+        if std::fs::rename(&partial, &thumbnail).is_err() {
+            let _ = std::fs::remove_file(&partial);
+        }
     }
-    let exif_enabled: String = db.query_row(
-        "SELECT value FROM settings WHERE key='read_exif'",
-        [],
-        |r| r.get(0),
-    )?;
     let mut exif = serde_json::Map::new();
-    if exif_enabled == "true" {
+    if read_exif {
         if let Ok(data) =
             exif::Reader::new().read_from_container(&mut BufReader::new(File::open(path)?))
         {
@@ -170,34 +195,193 @@ pub fn index_file(core: &Core, folder: i64, path: &Path, run: &str) -> Result<bo
         .created()
         .ok()
         .map(|t| DateTime::<Utc>::from(t).to_rfc3339());
-    let tx = db.transaction()?;
-    tx.execute("INSERT INTO images(folder_id,path,name,extension,size,width,height,ratio,created_at,modified,hash,phash,thumbnail,exif,status,seen_run) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'ready',?15) ON CONFLICT(path) DO UPDATE SET size=excluded.size,width=excluded.width,height=excluded.height,ratio=excluded.ratio,modified=excluded.modified,hash=excluded.hash,phash=excluded.phash,thumbnail=excluded.thumbnail,exif=excluded.exif,status='ready',error=NULL,missing=0,seen_run=excluded.seen_run",params![folder,path_s,path.file_name().unwrap_or_default().to_string_lossy(),path.extension().unwrap_or_default().to_string_lossy().to_lowercase(),size,width,height,width as f64/height as f64,created,modified,hash,phash,thumbnail.to_string_lossy(),serde_json::Value::Object(exif).to_string(),run])?;
-    if let Some((id, _, _, _, old_hash)) = old {
-        if old_hash.as_deref() != Some(&hash) {
-            tx.execute("DELETE FROM embeddings WHERE image_id=?", [id])?;
-            tx.execute(
-                "DELETE FROM descriptions WHERE image_id=? AND user_edited=0",
-                [id],
+    Ok(Prepared::Indexed {
+        path: path_s,
+        name: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        extension: path
+            .extension()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase(),
+        size,
+        width,
+        height,
+        created,
+        modified,
+        hash,
+        phash,
+        thumbnail: thumbnail.to_string_lossy().into_owned(),
+        exif: serde_json::Value::Object(exif).to_string(),
+        previous: existing.map(|old| (old.id, old.hash)),
+    })
+}
+
+fn apply_prepared(db: &mut rusqlite::Connection, folder: i64, run: &str, prepared: Prepared) -> Result<bool> {
+    match prepared {
+        Prepared::Reused { id } => {
+            db.execute(
+                "UPDATE images SET seen_run=?,missing=0 WHERE id=?",
+                params![run, id],
             )?;
-            tx.execute(
-                "DELETE FROM image_tags WHERE image_id=? AND confirmed=0",
-                [id],
-            )?;
-            tx.execute(
-                "DELETE FROM image_categories WHERE image_id=? AND source<>'user'",
-                [id],
-            )?;
+            Ok(false)
+        }
+        Prepared::Indexed {
+            path,
+            name,
+            extension,
+            size,
+            width,
+            height,
+            created,
+            modified,
+            hash,
+            phash,
+            thumbnail,
+            exif,
+            previous,
+        } => {
+            let tx = db.transaction()?;
+            tx.execute("INSERT INTO images(folder_id,path,name,extension,size,width,height,ratio,created_at,modified,hash,phash,thumbnail,exif,status,seen_run) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'ready',?15) ON CONFLICT(path) DO UPDATE SET size=excluded.size,width=excluded.width,height=excluded.height,ratio=excluded.ratio,modified=excluded.modified,hash=excluded.hash,phash=excluded.phash,thumbnail=excluded.thumbnail,exif=excluded.exif,status='ready',error=NULL,missing=0,seen_run=excluded.seen_run",params![folder,path,name,extension,size,width,height,width as f64/height as f64,created,modified,hash,phash,thumbnail,exif,run])?;
+            if let Some((id, old_hash)) = previous {
+                if old_hash.as_deref() != Some(hash.as_str()) {
+                    tx.execute("DELETE FROM embeddings WHERE image_id=?", [id])?;
+                    tx.execute(
+                        "DELETE FROM descriptions WHERE image_id=? AND user_edited=0",
+                        [id],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM image_tags WHERE image_id=? AND confirmed=0",
+                        [id],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM image_categories WHERE image_id=? AND source<>'user'",
+                        [id],
+                    )?;
+                }
+            }
+            tx.commit()?;
+            Ok(true)
         }
     }
-    tx.commit()?;
-    Ok(true)
+}
+
+pub fn index_file(core: &Core, folder: i64, path: &Path, run: &str) -> Result<bool> {
+    let mut db = core.db()?;
+    let resolved = std::fs::canonicalize(path)?;
+    let path_s = resolved.to_string_lossy().to_string();
+    let existing = db
+        .query_row(
+            "SELECT id,size,modified,status,hash FROM images WHERE path=?",
+            [&path_s],
+            |r| {
+                Ok(Existing {
+                    id: r.get(0)?,
+                    size: r.get(1)?,
+                    modified: r.get(2)?,
+                    status: r.get(3)?,
+                    hash: r.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    let read_exif: String = db.query_row(
+        "SELECT value FROM settings WHERE key='read_exif'",
+        [],
+        |r| r.get(0),
+    )?;
+    let prepared = prepare_image(&resolved, existing, &core.cache, read_exif == "true")?;
+    apply_prepared(&mut db, folder, run, prepared)
+}
+
+fn record_failure(
+    db: &rusqlite::Connection,
+    folder: i64,
+    job: &str,
+    path: &Path,
+    visit: &str,
+    message: &str,
+) -> Result<()> {
+    db.execute("INSERT INTO images(folder_id,path,name,extension,status,error,seen_run) VALUES(?,?,?,?,'failed',?,?) ON CONFLICT(path) DO UPDATE SET status='failed',error=excluded.error,seen_run=excluded.seen_run,missing=0",params![folder,path.to_string_lossy(),path.file_name().unwrap_or_default().to_string_lossy(),path.extension().unwrap_or_default().to_string_lossy().to_lowercase(),message,visit])?;
+    db.execute(
+        "INSERT INTO errors(job_id,path,message) VALUES(?,?,?)",
+        params![job, path.to_string_lossy(), message],
+    )?;
+    Ok(())
+}
+
+struct ScanProgress {
+    count: i64,
+    failed: i64,
+    changed: i64,
+    cancelled: bool,
+    last_note: Instant,
+}
+
+fn accept_scan_result(
+    db: &mut rusqlite::Connection,
+    folder: i64,
+    job: &str,
+    visit: &str,
+    started: Instant,
+    progress: &mut ScanProgress,
+    path: PathBuf,
+    result: Option<Result<Prepared>>,
+) -> Result<()> {
+    let Some(result) = result else {
+        progress.cancelled = true;
+        return Ok(());
+    };
+    progress.count += 1;
+    match result {
+        Ok(prepared) => {
+            if apply_prepared(db, folder, visit, prepared)? {
+                progress.changed += 1;
+            }
+        }
+        Err(error) => {
+            progress.failed += 1;
+            record_failure(db, folder, job, &path, visit, &error.to_string())?;
+        }
+    }
+    note_progress(
+        db,
+        job,
+        progress.count,
+        progress.failed,
+        progress.changed,
+        started,
+        &mut progress.last_note,
+        false,
+    )
+}
+
+fn note_progress(
+    db: &rusqlite::Connection,
+    job: &str,
+    count: i64,
+    failed: i64,
+    changed: i64,
+    started: Instant,
+    last_note: &mut Instant,
+    force: bool,
+) -> Result<()> {
+    if !force && last_note.elapsed() < Duration::from_millis(400) {
+        return Ok(());
+    }
+    *last_note = Instant::now();
+    db.execute("UPDATE jobs SET processed=?,failed=?,total=?,message=?,elapsed_ms=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",params![count,failed,count,format!("发现 {count} 张 · 新增或更新 {changed} 张；总量在遍历完成后确定"),started.elapsed().as_millis() as i64,job])?;
+    Ok(())
 }
 
 pub fn scan(core: &Core, job: &str, folder: i64, control: Arc<AtomicU8>) -> Result<()> {
     // A resumed job re-traverses from the beginning. Its visit marker must be new
     // so files deleted since the previous attempt are correctly marked missing.
     let visit = uuid::Uuid::new_v4().to_string();
-    let db = core.db()?;
+    let mut db = core.db()?;
     let root: String = db.query_row("SELECT path FROM folders WHERE id=?", [folder], |r| {
         r.get(0)
     })?;
@@ -205,47 +389,144 @@ pub fn scan(core: &Core, job: &str, folder: i64, control: Arc<AtomicU8>) -> Resu
         bail!("目录不可访问；现有索引已保留")
     }
     let started = Instant::now();
-    let (mut count, mut failed, mut changed) = (0, 0, 0);
+    let mut progress = ScanProgress {
+        count: 0,
+        failed: 0,
+        changed: 0,
+        cancelled: false,
+        last_note: Instant::now(),
+    };
     let mut traversal_failed = false;
     let read_exif: String = db.query_row(
         "SELECT value FROM settings WHERE key='read_exif'",
         [],
         |r| r.get(0),
     )?;
-    if read_exif != "true" {
+    let read_exif = read_exif == "true";
+    if !read_exif {
         db.execute("UPDATE images SET exif='{}' WHERE folder_id=?", [folder])?;
     }
-    for entry in WalkDir::new(&root).follow_links(false).into_iter() {
-        if !checkpoint(&control) {
-            return Ok(());
+    let mut known = HashMap::new();
+    {
+        let mut stmt = db.prepare(
+            "SELECT path,id,size,modified,status,hash FROM images WHERE folder_id=?",
+        )?;
+        let rows = stmt.query_map([folder], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                Existing {
+                    id: row.get(1)?,
+                    size: row.get(2)?,
+                    modified: row.get(3)?,
+                    status: row.get(4)?,
+                    hash: row.get(5)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (path, existing) = row?;
+            known.insert(path, existing);
         }
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                traversal_failed = true;
-                failed += 1;
-                crate::jobs::error(core, job, &root, &e.to_string())?;
+    }
+    let known = Arc::new(known);
+    let workers = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(1, 4);
+    let (task_tx, task_rx) = mpsc::sync_channel::<PathBuf>(workers);
+    let (done_tx, done_rx) = mpsc::sync_channel(workers);
+    let task_rx = Mutex::new(task_rx);
+    let scan_result: Result<()> = thread::scope(|scope| {
+        for _ in 0..workers {
+            let done_tx = done_tx.clone();
+            let task_rx = &task_rx;
+            let known = Arc::clone(&known);
+            let cache = core.cache.clone();
+            let control = Arc::clone(&control);
+            scope.spawn(move || {
+                loop {
+                    let path = {
+                        let rx = task_rx.lock().unwrap();
+                        rx.recv()
+                    };
+                    let Ok(path) = path else { break };
+                    if !checkpoint(&control) {
+                        let _ = done_tx.send((path, None));
+                        continue;
+                    }
+                    let result = (|| {
+                        let resolved = std::fs::canonicalize(&path)?;
+                        let key = resolved.to_string_lossy().to_string();
+                        let existing = known.get(&key).cloned();
+                        prepare_image(&resolved, existing, &cache, read_exif)
+                    })();
+                    if done_tx.send((path, Some(result))).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(done_tx);
+        for entry in WalkDir::new(&root).follow_links(false).into_iter() {
+            if !checkpoint(&control) {
+                progress.cancelled = true;
+                break;
+            }
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    traversal_failed = true;
+                    progress.failed += 1;
+                    record_failure(&db, folder, job, Path::new(&root), &visit, &error.to_string())?;
+                    continue;
+                }
+            };
+            if !entry.file_type().is_file() || !supported(entry.path()) {
                 continue;
             }
-        };
-        if !entry.file_type().is_file() || !supported(entry.path()) {
-            continue;
-        }
-        count += 1;
-        match index_file(core, folder, entry.path(), &visit) {
-            Ok(updated) => {
-                changed += i64::from(updated);
+            let mut pending = entry.path().to_path_buf();
+            loop {
+                while let Ok((path, result)) = done_rx.try_recv() {
+                    accept_scan_result(
+                        &mut db, folder, job, &visit, started, &mut progress, path, result,
+                    )?;
+                }
+                match task_tx.try_send(pending) {
+                    Ok(()) => break,
+                    Err(mpsc::TrySendError::Full(returned)) => {
+                        pending = returned;
+                        let (path, result) = done_rx.recv().context("扫描线程已退出")?;
+                        accept_scan_result(
+                            &mut db, folder, job, &visit, started, &mut progress, path, result,
+                        )?;
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        progress.cancelled = true;
+                        break;
+                    }
+                }
             }
-            Err(e) => {
-                failed += 1;
-                let p = entry.path().to_string_lossy();
-                db.execute("INSERT INTO images(folder_id,path,name,extension,status,error,seen_run) VALUES(?,?,?,?,'failed',?,?) ON CONFLICT(path) DO UPDATE SET status='failed',error=excluded.error,seen_run=excluded.seen_run,missing=0",params![folder,p,entry.file_name().to_string_lossy(),entry.path().extension().unwrap_or_default().to_string_lossy().to_lowercase(),e.to_string(),visit])?;
-                crate::jobs::error(core, job, &p, &e.to_string())?;
-            }
         }
-        db.execute("UPDATE jobs SET processed=?,failed=?,total=?,message=?,elapsed_ms=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",params![count,failed,count,format!("发现 {count} 张 · 新增或更新 {changed} 张；总量在遍历完成后确定"),started.elapsed().as_millis() as i64,job])?;
-    }
-    if !checkpoint(&control) {
+        drop(task_tx);
+        while let Ok((path, result)) = done_rx.recv() {
+            accept_scan_result(
+                &mut db, folder, job, &visit, started, &mut progress, path, result,
+            )?;
+        }
+        Ok(())
+    });
+    scan_result?;
+    if progress.cancelled || !checkpoint(&control) {
+        note_progress(
+            &db,
+            job,
+            progress.count,
+            progress.failed,
+            progress.changed,
+            started,
+            &mut progress.last_note,
+            true,
+        )?;
         return Ok(());
     }
     // Never mark unseen files missing after cancellation or an incomplete traversal.
@@ -262,12 +543,14 @@ pub fn scan(core: &Core, job: &str, folder: i64, control: Arc<AtomicU8>) -> Resu
     db.execute(
         "UPDATE jobs SET processed=?,failed=?,total=?,message=?,elapsed_ms=? WHERE id=?",
         params![
-            count,
-            failed,
-            count,
+            progress.count,
+            progress.failed,
+            progress.count,
             format!(
-                "扫描完成 · {changed} 张更新 · {} 张复用 · {failed} 个错误",
-                (count - changed - failed).max(0)
+                "扫描完成 · {} 张更新 · {} 张复用 · {} 个错误",
+                progress.changed,
+                (progress.count - progress.changed - progress.failed).max(0),
+                progress.failed
             ),
             started.elapsed().as_millis() as i64,
             job
