@@ -277,7 +277,7 @@ fn analyze(core: &Core, job: &str, task: &str, control: &AtomicU8) -> Result<()>
                             |r| r.get(0),
                         )
                         .context("请先生成或填写图片描述")?;
-                    let vector = provider.text_embedding(&text)?;
+                    let vector = provider.text_embedding(&text, "document")?;
                     description_snapshot = Some(text);
                     vector
                 };

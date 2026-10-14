@@ -137,3 +137,9 @@ Ollama 连接测试记录 `/api/tags` 的模型 digest，版本变化清除已�
 限制：未向用户 DeepSeek 服务发送图片，不能声称已复现或消除那条历史错误；新版会给出可操作的具体错误。HTTP 协议夹具用于验证客户端行为，不代表模型质量。浏览器预览没有 Tauri 数据库，保存与任务链路由上述 Rust 集成测试验证。GPU 环境安装仍保持用户要求的暂停状态，本轮没有继续修改或安装环境。
 
 交付验证：最终 Windows exe 与 NSIS 安装包构建成功，已复制到 release/，SHA256SUMS.txt 同步更新。界面截图：artifacts/vision-prompt-settings.png（浏览器预览，仅检查输入和布局）。
+
+## 嵌入模型替换为 EmbeddingGemma 2（2026-10-14）
+
+本地嵌入从 WeMM-Embedding-2B 换成 EmbeddingGemma 2。`services/gemma_server.py` 用 SentenceTransformers 加载 `EmbeddingGemma-2`，只启用文本和视觉编码器，输出 768 维。查询使用 `SearchQuery` 前缀，描述索引使用 `Document` 前缀，图片不加前缀。CUDA 仅使用 bfloat16，不支持时使用 float32，禁止 float16。提供商标识改为 `embeddinggemma`。数据库版本 3 会把已保存的 WeMM 配置改到新提供商和模型名，并清空能力与版本指纹；旧向量因指纹不匹配而不再参与检索。图片嵌入上传最长边 1024 的 JPEG。Ollama 与 OpenAI 兼容路径保持原样。旧权重目录 `WeMM-Embedding-2B` 不再被启动脚本使用。
+
+验证：Rust 库测试 22 项通过，真实端到端测试 1 项按默认忽略；前端测试 2 项通过，TypeScript 检查通过。Python 运行时测试 7 项通过。在 CPU、float32 上实际加载本地权重：文本与图片都返回 768 维单位向量。三张公开图片上，“一只白色的狗”“一杯咖啡”“穿着宇航服的宇航员”都把对应图片排在第一位，余弦约 0.717、0.730、0.725。单张图片 CPU 嵌入约 6.5 秒。Windows 发布程序和 NSIS 安装包已重新构建并复制到 `release/`，校验值已更新。Clippy 仍报告 `scanner.rs` 里原有的 dead_code、大枚举和参数个数告警，本次没有改该文件。没有在桌面窗口里点击模型表单。

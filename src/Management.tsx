@@ -503,8 +503,8 @@ export function Models({
                   <p className="text-xs text-muted-foreground">
                     {m.provider === "openai"
                       ? "OpenAI 兼容 API"
-                      : m.provider === "wemm"
-                        ? "本地 WeMM"
+                      : m.provider === "embeddinggemma"
+                        ? "本地 EmbeddingGemma 2"
                         : "Ollama"}
                   </p>
                 </div>
@@ -543,7 +543,7 @@ export function Models({
               <p className="text-sm break-all text-muted-foreground">
                 {m.base_url}
               </p>
-              {m.provider !== "wemm" ? (
+              {m.provider !== "embeddinggemma" ? (
                 <Collapsible className="rounded-lg border px-3 py-2 text-sm">
                   <CollapsibleTrigger>
                     图片理解提示词 · 输出上限 {m.vision_max_tokens ?? 4096}{" "}
@@ -627,19 +627,19 @@ export function Models({
       </div>
       {data?.items?.length === 0 ? (
         <EmptyState title="配置你的第一个模型">
-          <p>使用 Ollama 或本地 WeMM，也可以连接你选择的兼容 API。</p>
+          <p>使用 Ollama 或本地 EmbeddingGemma 2，也可以连接你选择的兼容 API。</p>
           <Button
             onClick={() =>
               setForm({
                 ...newModel,
-                provider: "wemm",
-                name: "本地 WeMM 2B",
-                model: "WeMM-Embedding-2B",
+                provider: "embeddinggemma",
+                name: "本地 EmbeddingGemma 2",
+                model: "EmbeddingGemma-2",
                 base_url: "http://127.0.0.1:8787",
               })
             }
           >
-            配置本地 WeMM
+            配置本地 EmbeddingGemma 2
           </Button>
         </EmptyState>
       ) : null}
@@ -689,20 +689,20 @@ export function Models({
       </Card>
       <Card>
         <CardHeader>
-          <SectionTitle>本地 WeMM 服务</SectionTitle>
+          <SectionTitle>本地 EmbeddingGemma 2 服务</SectionTitle>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
           <p>
             在项目目录打开终端，使用独立 Conda 环境启动推理服务。默认使用
-            CPU，适合当前 4GB 显存设备。
+            CPU。CUDA 仅使用 bfloat16；这台 4GB 显存机器不要改成 float16。
           </p>
           <pre className="overflow-auto rounded-lg bg-muted p-3 text-xs">
-            conda activate sortnest{"\n"}python -s services/wemm_server.py
-            --model-dir ./WeMM-Embedding-2B --device cpu
+            conda activate sortnest{"\n"}python -s services/gemma_server.py
+            --model-dir ./EmbeddingGemma-2 --device cpu
           </pre>
           <p className="text-xs text-muted-foreground">
-            Base URL：http://127.0.0.1:8787 · 模型名：WeMM-Embedding-2B。WeMM
-            仅生成向量，不生成描述或标签。
+            Base URL：http://127.0.0.1:8787 · 模型名：EmbeddingGemma-2。文本和图片共用 768
+            维空间。该模型只生成向量，不生成描述或标签。换模型后需要重新测试并重建向量索引。
           </p>
         </CardContent>
       </Card>
@@ -740,16 +740,16 @@ export function Models({
                       base_url:
                         value === "ollama"
                           ? "http://127.0.0.1:11434"
-                          : value === "wemm"
+                          : value === "embeddinggemma"
                             ? "http://127.0.0.1:8787"
                             : "https://api.openai.com/v1",
-                      model: value === "wemm" ? "WeMM-Embedding-2B" : "",
+                      model: value === "embeddinggemma" ? "EmbeddingGemma-2" : "",
                     }));
                   }}
                   options={[
                     { value: "ollama", label: "Ollama" },
                     { value: "openai", label: "OpenAI 兼容 API" },
-                    { value: "wemm", label: "本地 WeMM" },
+                    { value: "embeddinggemma", label: "本地 EmbeddingGemma 2" },
                   ]}
                 />
               </Field>
@@ -809,7 +809,7 @@ export function Models({
                   placeholder="模型权重或参数更换时更新此值"
                 />
               </Field>
-              {form.provider !== "wemm" ? (
+              {form.provider !== "embeddinggemma" ? (
                 <>
                   <Field>
                     <FieldLabel htmlFor="vision-prompt">图片理解提示词</FieldLabel>

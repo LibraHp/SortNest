@@ -11,5 +11,6 @@ __pycache__/
 *.sqlite*
 .env*
 WeMM-Embedding-2B/
+EmbeddingGemma-2/
 artifacts/
 *.tsbuildinfo

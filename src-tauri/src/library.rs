@@ -277,7 +277,7 @@ pub fn search(core: &Core, args: &Value) -> Result<Value> {
                 .as_str()
                 .filter(|s| !s.trim().is_empty())
                 .context("请输入查询文本")?;
-            let q = p.text_embedding(text)?;
+            let q = p.text_embedding(text, "query")?;
             (model, "description", q)
         } else if mode == "semantic" {
             let model = models::assigned(core, "image_embedding")?;
@@ -288,7 +288,7 @@ pub fn search(core: &Core, args: &Value) -> Result<Value> {
                 .as_str()
                 .filter(|s| !s.trim().is_empty())
                 .context("请输入查询文本")?;
-            let q = p.text_embedding(text)?;
+            let q = p.text_embedding(text, "query")?;
             (model, "image", q)
         } else {
             bail!("未知搜索模式")

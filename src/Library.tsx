@@ -318,7 +318,7 @@ export default function Library({
                   ? "按文件 SHA-256 检测字节完全相同的文件。"
                   : mode === "description"
                     ? "先生成图片描述，再运行描述向量索引；这是描述文本的语义检索。"
-                    : "需要先测试模型能力并完成图片向量索引。跨模态检索要求同一 WeMM 或 Ollama 模型、版本及匹配的文本和图片向量维度。"}
+                    : "需要先测试模型能力并完成图片向量索引。跨模态检索要求同一 EmbeddingGemma 或 Ollama 模型、版本及匹配的文本和图片向量维度。"}
             </p>
           </CardContent>
         </Card>

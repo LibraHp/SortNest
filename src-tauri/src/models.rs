@@ -98,24 +98,32 @@ pub fn validate(m: &Model) -> Result<()> {
     {
         bail!("URL 不应包含凭据、查询参数或片段，请在 API Key 栏填写凭据")
     }
-    if !matches!(m.provider.as_str(), "ollama" | "openai" | "wemm") {
+    if !matches!(m.provider.as_str(), "ollama" | "openai" | "embeddinggemma") {
         bail!("未知模型提供商")
     }
-    if m.provider == "wemm" && !is_loopback(&m.base_url) {
-        bail!("WeMM 本地适配器只允许回环地址")
+    if m.provider == "embeddinggemma" && !is_loopback(&m.base_url) {
+        bail!("EmbeddingGemma 本地适配器只允许回环地址")
     }
     if m.name.trim().is_empty() || m.model.trim().is_empty() {
         bail!("请填写配置名称和模型名称")
     }
     Ok(())
 }
+pub fn input_profile(provider: &str) -> &'static str {
+    if provider == "embeddinggemma" {
+        "jpeg85-edge1024"
+    } else {
+        "jpeg75-edge256"
+    }
+}
 pub fn fingerprint(m: &Model) -> String {
     let value = format!(
-        "sortnest-v2|{}|{}|{}|{}|jpeg75-edge256",
+        "sortnest-v2|{}|{}|{}|{}|{}",
         m.provider,
         m.base_url.trim_end_matches('/'),
         m.model,
-        m.revision
+        m.revision,
+        input_profile(&m.provider)
     );
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
@@ -139,7 +147,7 @@ pub fn catalog(value: Value) -> Result<Value> {
     }
     let (path, array, key) = match provider.config.provider.as_str() {
         "ollama" => ("/api/tags", "models", "name"),
-        "wemm" => ("/health", "", "model"),
+        "embeddinggemma" => ("/health", "", "model"),
         _ => ("/models", "data", "id"),
     };
     let response = provider.request(path, None)?;
@@ -215,7 +223,7 @@ pub fn assigned(core: &Core, task: &str) -> Result<Model> {
 }
 pub trait ModelProvider {
     fn available(&self) -> Result<Value>;
-    fn text_embedding(&self, text: &str) -> Result<Vec<f32>>;
+    fn text_embedding(&self, text: &str, role: &str) -> Result<Vec<f32>>;
     fn image_embedding(&self, path: &Path) -> Result<Vec<f32>>;
     fn understand(&self, path: &Path, prompt: &str) -> Result<String>;
 }
@@ -267,7 +275,7 @@ impl HttpProvider {
         let status = response.status();
         if !status.is_success() {
             if ollama_image && status.as_u16() == 501 {
-                bail!("Ollama 当前模型不支持图片嵌入（HTTP 501 / media embeddings）。文本嵌入可用不代表图片嵌入可用；请使用支持图片嵌入的 Ollama 模型，或选择本地 WeMM。")
+                bail!("Ollama 当前模型不支持图片嵌入（HTTP 501 / media embeddings）。文本嵌入可用不代表图片嵌入可用；请使用支持图片嵌入的 Ollama 模型，或选择本地 EmbeddingGemma。")
             }
             if ollama_image && status.as_u16() == 400 {
                 bail!("Ollama 拒绝图片嵌入请求（HTTP 400）。请确认服务支持 /api/embed 的 input.image 格式，并且该模型支持图片嵌入。")
@@ -283,7 +291,7 @@ impl HttpProvider {
         response.json().context("模型响应不是有效 JSON")
     }
     fn check_revision(&self, response: &Value) -> Result<()> {
-        if self.config.provider == "wemm"
+        if self.config.provider == "embeddinggemma"
             && response["revision"].as_str() != Some(self.config.revision.as_str())
         {
             bail!("本地模型权重或预处理版本已变化。请重新运行连接测试、能力测试，并重建向量索引。")
@@ -303,17 +311,19 @@ impl HttpProvider {
 }
 const MODEL_IMAGE_EDGE: u32 = 256;
 const MODEL_JPEG_QUALITY: u8 = 75;
+const GEMMA_IMAGE_EDGE: u32 = 1024;
+const GEMMA_JPEG_QUALITY: u8 = 85;
 
-pub fn compress_for_model(image: image::DynamicImage) -> Result<Vec<u8>> {
+fn compress_image(image: image::DynamicImage, edge: u32, quality: u8) -> Result<Vec<u8>> {
     let (width, height) = (image.width(), image.height());
-    let fitted = if width <= MODEL_IMAGE_EDGE && height <= MODEL_IMAGE_EDGE {
+    let fitted = if width <= edge && height <= edge {
         image
     } else {
-        image.thumbnail(MODEL_IMAGE_EDGE, MODEL_IMAGE_EDGE)
+        image.thumbnail(edge, edge)
     };
     let rgb = fitted.to_rgb8();
     let mut encoded = Cursor::new(Vec::new());
-    JpegEncoder::new_with_quality(&mut encoded, MODEL_JPEG_QUALITY).write_image(
+    JpegEncoder::new_with_quality(&mut encoded, quality).write_image(
         rgb.as_raw(),
         rgb.width(),
         rgb.height(),
@@ -322,8 +332,26 @@ pub fn compress_for_model(image: image::DynamicImage) -> Result<Vec<u8>> {
     Ok(encoded.into_inner())
 }
 
+pub fn compress_for_model(image: image::DynamicImage) -> Result<Vec<u8>> {
+    compress_image(image, MODEL_IMAGE_EDGE, MODEL_JPEG_QUALITY)
+}
+
+pub fn compress_for_gemma(image: image::DynamicImage) -> Result<Vec<u8>> {
+    compress_image(image, GEMMA_IMAGE_EDGE, GEMMA_JPEG_QUALITY)
+}
+
 pub fn image_base64(path: &Path) -> Result<String> {
     Ok(STANDARD.encode(compress_for_model(scanner::decode(path)?)?))
+}
+
+fn image_base64_for(provider: &str, path: &Path) -> Result<String> {
+    let image = scanner::decode(path)?;
+    let encoded = if provider == "embeddinggemma" {
+        compress_for_gemma(image)?
+    } else {
+        compress_for_model(image)?
+    };
+    Ok(STANDARD.encode(encoded))
 }
 pub fn normalize(mut v: Vec<f32>) -> Result<Vec<f32>> {
     if v.is_empty() || v.len() > 65536 || v.iter().any(|x| !x.is_finite()) {
@@ -413,7 +441,7 @@ impl ModelProvider for HttpProvider {
                 ollama_model(&data, &self.config.model)?;
                 Ok(data)
             }
-            "wemm" => {
+            "embeddinggemma" => {
                 let v = self.request("/health", None)?;
                 if v["model"].as_str() != Some(&self.config.model) || v["ready"] != true {
                     bail!("本地服务模型未就绪或名称不匹配")
@@ -436,7 +464,7 @@ impl ModelProvider for HttpProvider {
             }
         }
     }
-    fn text_embedding(&self, text: &str) -> Result<Vec<f32>> {
+    fn text_embedding(&self, text: &str, role: &str) -> Result<Vec<f32>> {
         let m = &self.config.model;
         match self.config.provider.as_str() {
             "ollama" => {
@@ -444,8 +472,11 @@ impl ModelProvider for HttpProvider {
                 let v = self.request("/api/embed", Some(json!({"model":m,"input":text})))?;
                 vector(&v["embeddings"][0])
             }
-            "wemm" => {
-                let v = self.request("/embed", Some(json!({"model":m,"text":text})))?;
+            "embeddinggemma" => {
+                if !matches!(role, "query" | "document") {
+                    bail!("EmbeddingGemma 文本角色必须是 query 或 document")
+                }
+                let v = self.request("/embed", Some(json!({"model":m,"text":text,"role":role})))?;
                 self.check_revision(&v)?;
                 vector(&v["embedding"])
             }
@@ -460,8 +491,8 @@ impl ModelProvider for HttpProvider {
     }
     fn image_embedding(&self, path: &Path) -> Result<Vec<f32>> {
         match self.config.provider.as_str() {
-            "wemm" => {
-                let v = self.request("/embed", Some(json!({"model":self.config.model,"image":image_base64(path)?})))?;
+            "embeddinggemma" => {
+                let v = self.request("/embed", Some(json!({"model":self.config.model,"image":image_base64_for("embeddinggemma", path)?})))?;
                 self.check_revision(&v)?;
                 vector(&v["embedding"])
             }
@@ -470,7 +501,7 @@ impl ModelProvider for HttpProvider {
                 let v = self.request("/api/embed", Some(json!({"model":self.config.model,"input":{"image":image_base64(path)?}})))?;
                 vector(&v["embeddings"][0])
             }
-            _ => bail!("标准 OpenAI /embeddings 适配器仅支持文本输入。图片向量请使用本地 WeMM 或通过图片嵌入测试的 Ollama 模型；也可使用描述语义检索。"),
+            _ => bail!("标准 OpenAI /embeddings 适配器仅支持文本输入。图片向量请使用本地 EmbeddingGemma 或通过图片嵌入测试的 Ollama 模型；也可使用描述语义检索。"),
         }
     }
     fn understand(&self, path: &Path, prompt: &str) -> Result<String> {
@@ -479,7 +510,7 @@ impl ModelProvider for HttpProvider {
         let response=match self.config.provider.as_str(){
             "ollama"=>self.request("/api/chat",Some(json!({"model":m,"stream":false,"options":{"num_predict":self.config.vision_max_tokens},"messages":[{"role":"user","content":prompt,"images":[image]}]})))?,
             "openai"=>self.request("/chat/completions",Some(json!({"model":m,"stream":false,"messages":[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":format!("data:image/jpeg;base64,{image}")}}]}],"max_tokens":self.config.vision_max_tokens})))?,
-            _=>bail!("WeMM 为嵌入模型，不能生成描述、分类或标签")
+            _=>bail!("EmbeddingGemma 2 为嵌入模型，不能生成描述、分类或标签")
         };
         chat_text(&response, self.config.provider == "ollama")
     }
@@ -487,14 +518,14 @@ impl ModelProvider for HttpProvider {
 pub fn test(core: &Core, id: &str, kind: &str, path: Option<&str>) -> Result<Value> {
     let mut m = load(core, id)?;
     let result = (|| -> Result<Value> {
-        if matches!(m.provider.as_str(), "wemm" | "ollama") && kind == "connection" {
+        if matches!(m.provider.as_str(), "embeddinggemma" | "ollama") && kind == "connection" {
             let info = HttpProvider::new(m.clone())?.available()?;
             let revision = if m.provider == "ollama" {
                 ollama_revision(&info, &m.model)?
             } else {
                 info["revision"]
                     .as_str()
-                    .context("WeMM 服务没有提供模型版本指纹")?
+                    .context("EmbeddingGemma 服务没有提供模型版本指纹")?
             };
             if revision != m.revision {
                 m.revision = revision.to_owned();
@@ -513,7 +544,7 @@ pub fn test(core: &Core, id: &str, kind: &str, path: Option<&str>) -> Result<Val
                 Ok(json!({"connection":true}))
             }
             "text" => {
-                let v = provider.text_embedding("一只橘猫坐在窗边")?;
+                let v = provider.text_embedding("一只橘猫坐在窗边", "query")?;
                 Ok(json!({"text":true,"text_dimension":v.len()}))
             }
             "image" => {
@@ -563,12 +594,12 @@ pub fn compatible(a: &Model, b: &Model) -> Result<()> {
     require(b, "text")?;
     if a.fingerprint != b.fingerprint
         || a.provider != b.provider
-        || !matches!(a.provider.as_str(), "wemm" | "ollama")
+        || !matches!(a.provider.as_str(), "embeddinggemma" | "ollama")
         || a.revision.is_empty()
         || a.revision != b.revision
         || a.capabilities["image_dimension"] != b.capabilities["text_dimension"]
     {
-        bail!("文本与图片向量空间不兼容；需要同一 WeMM 或 Ollama 模型、版本、服务和实测维度，且文本与图片嵌入测试均通过")
+        bail!("文本与图片向量空间不兼容；需要同一 EmbeddingGemma 或 Ollama 模型、版本、服务和实测维度，且文本与图片嵌入测试均通过")
     }
     Ok(())
 }
@@ -602,8 +633,8 @@ mod tests {
     use super::*;
     #[test]
     fn model_input_is_a_compressed_jpeg_within_256_pixels() {
-        let source = image::RgbImage::from_fn(2000, 1000, |x, _| image::Rgb([(x % 256) as u8, 40, 80]));
-        let encoded = compress_for_model(image::DynamicImage::ImageRgb8(source)).unwrap();
+        let source = || image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(2000, 1000, |x, _| image::Rgb([(x % 256) as u8, 40, 80])));
+        let encoded = compress_for_model(source()).unwrap();
         let decoded = image::ImageReader::new(Cursor::new(&encoded))
             .with_guessed_format()
             .unwrap()
@@ -612,6 +643,13 @@ mod tests {
         assert!(decoded.width() <= 256 && decoded.height() <= 256);
         assert!(decoded.width() > decoded.height());
         assert!(encoded.len() < 200_000);
+        let gemma = compress_for_gemma(source()).unwrap();
+        let gemma_image = image::ImageReader::new(Cursor::new(&gemma))
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .unwrap();
+        assert_eq!((gemma_image.width(), gemma_image.height()), (1024, 512));
     }
     #[test]
     fn chat_response_accepts_text_blocks_but_never_reasoning_as_answer() {
@@ -819,7 +857,7 @@ mod tests {
         assert!(compatible(&model, &other).is_err());
         assert!(HttpProvider::new(model.clone())
             .unwrap()
-            .text_embedding("query")
+            .text_embedding("query", "query")
             .unwrap_err()
             .to_string()
             .contains("版本已变化"));
@@ -906,17 +944,98 @@ mod tests {
             assert!(validate(&model).is_err(), "{url}");
         }
         model.base_url = "http://model.example.test:8787".into();
-        model.provider = "wemm".into();
+        model.provider = "embeddinggemma".into();
         assert!(validate(&model).is_err());
+    }
+    #[test]
+    fn embeddinggemma_sends_task_roles_and_records_the_service_revision() {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, Mutex};
+        let seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let record = seen.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 8192];
+                let (header_end, length) = loop {
+                    let read = stream.read(&mut buffer).unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&buffer[..read]);
+                    if let Some(end) = request.windows(4).position(|v| v == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                        let length = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length: "))
+                            .unwrap_or("0")
+                            .parse::<usize>()
+                            .unwrap();
+                        break (end + 4, length);
+                    }
+                };
+                while request.len() < header_end + length {
+                    let read = stream.read(&mut buffer).unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let start = String::from_utf8_lossy(&request[..header_end])
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .to_owned();
+                let body = if length == 0 {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(&request[header_end..]).unwrap()
+                };
+                record.lock().unwrap().push(json!({"start": start, "body": body}));
+                let response = if start.starts_with("GET /health ") {
+                    json!({"ready":true,"model":"EmbeddingGemma-2","revision":"rev-gemma"})
+                } else {
+                    json!({"embedding":[3.0,4.0],"revision":"rev-gemma","dimension":2})
+                };
+                let payload = response.to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len()).unwrap();
+            }
+        });
+        let root = tempfile::tempdir().unwrap();
+        let core = Core::new(root.path().join("data")).unwrap();
+        let picture = root.path().join("wide.png");
+        image::RgbImage::new(16, 16).save(&picture).unwrap();
+        let saved = save(&core, json!({"id":"","name":"Gemma","provider":"embeddinggemma","base_url":url,"model":"EmbeddingGemma-2"})).unwrap();
+        let id = saved["id"].as_str().unwrap();
+        test(&core, id, "connection", None).unwrap();
+        test(&core, id, "text", None).unwrap();
+        test(&core, id, "image", picture.to_str()).unwrap();
+        let model = load(&core, id).unwrap();
+        assert_eq!(model.revision, "rev-gemma");
+        assert_eq!(model.capabilities["text_dimension"], 2);
+        assert_eq!(model.capabilities["image_dimension"], 2);
+        HttpProvider::new(model).unwrap().text_embedding("一只白色的狗", "document").unwrap();
+        let calls = seen.lock().unwrap().clone();
+        assert_eq!(calls.len(), 5);
+        assert!(calls[0]["start"].as_str().unwrap().starts_with("GET /health "));
+        assert_eq!(calls[2]["body"]["role"], "query");
+        assert_eq!(calls[2]["body"]["text"], "一只橘猫坐在窗边");
+        assert!(calls[3]["body"].get("role").is_none());
+        assert!(calls[3]["body"].get("text").is_none());
+        let image = STANDARD.decode(calls[3]["body"]["image"].as_str().unwrap()).unwrap();
+        assert!(image::load_from_memory(&image).is_ok());
+        assert_eq!(calls[4]["body"]["role"], "document");
+        assert_eq!(calls[4]["body"]["text"], "一只白色的狗");
+        worker.join().unwrap();
     }
     #[test]
     fn equal_dimensions_do_not_imply_compatibility() {
         let a = Model {
             id: "a".into(),
             name: "A".into(),
-            provider: "wemm".into(),
+            provider: "embeddinggemma".into(),
             base_url: "http://127.0.0.1:8787".into(),
-            model: "WeMM-Embedding-2B".into(),
+            model: "EmbeddingGemma-2".into(),
             revision: "v1".into(),
             remote_consent: false,
             fingerprint: "a".into(),

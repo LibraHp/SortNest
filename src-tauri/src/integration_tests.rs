@@ -240,7 +240,7 @@ fn changed_content_invalidates_ai_but_preserves_user_edits() {
     )
     .unwrap();
     let db = core.db().unwrap();
-    db.execute("INSERT INTO models(id,name,provider,base_url,model,fingerprint) VALUES('m','m','wemm','http://127.0.0.1:8787','m','old')",[]).unwrap();
+    db.execute("INSERT INTO models(id,name,provider,base_url,model,fingerprint) VALUES('m','m','embeddinggemma','http://127.0.0.1:8787','m','old')",[]).unwrap();
     db.execute("INSERT INTO embeddings(image_id,model_id,fingerprint,kind,dimension,vector,content_hash) VALUES(1,'m','old','image',1,?,'old')",[models::pack(&[1.])]).unwrap();
     let old = std::fs::metadata(&p).unwrap().modified().unwrap();
     image::RgbImage::from_pixel(10, 10, image::Rgb([0, 255, 0]))
@@ -278,13 +278,13 @@ fn unavailable_service_is_reported_without_credentials() {
 }
 
 #[test]
-#[ignore = "requires local WeMM service and downloaded public fixtures"]
-fn real_wemm_end_to_end() {
+#[ignore = "requires local EmbeddingGemma 2 service and downloaded public fixtures"]
+fn real_gemma_end_to_end() {
     let deployed = models::catalog(
-        json!({"id":"","name":"","provider":"wemm","base_url":"http://127.0.0.1:8787","model":""}),
+        json!({"id":"","name":"","provider":"embeddinggemma","base_url":"http://127.0.0.1:8787","model":""}),
     )
     .unwrap();
-    assert_eq!(deployed[0], "WeMM-Embedding-2B");
+    assert_eq!(deployed[0], "EmbeddingGemma-2");
     let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap();
@@ -314,12 +314,12 @@ fn real_wemm_end_to_end() {
         assert!(deadline.elapsed() < Duration::from_secs(5));
         std::thread::yield_now();
     }
-    models::save(&core,json!({"id":"wemm-e2e","name":"本地 WeMM 2B","provider":"wemm","base_url":"http://127.0.0.1:8787","model":"WeMM-Embedding-2B"})).unwrap();
-    models::test(&core, "wemm-e2e", "connection", None).unwrap();
-    models::test(&core, "wemm-e2e", "text", None).unwrap();
+    models::save(&core,json!({"id":"gemma-e2e","name":"本地 EmbeddingGemma 2","provider":"embeddinggemma","base_url":"http://127.0.0.1:8787","model":"EmbeddingGemma-2"})).unwrap();
+    models::test(&core, "gemma-e2e", "connection", None).unwrap();
+    models::test(&core, "gemma-e2e", "text", None).unwrap();
     models::test(
         &core,
-        "wemm-e2e",
+        "gemma-e2e",
         "image",
         Some(pictures.join("coffee.png").to_str().unwrap()),
     )
@@ -329,7 +329,7 @@ fn real_wemm_end_to_end() {
             &core,
             None,
             "assign",
-            json!({"task":task,"model_id":"wemm-e2e"}),
+            json!({"task":task,"model_id":"gemma-e2e"}),
         )
         .unwrap();
     }

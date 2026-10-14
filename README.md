@@ -26,32 +26,32 @@ npm run package
 
 `npm run dev` 仅用于网页界面开发，浏览器预览不会模拟数据库、文件选择或 AI 结果。实际功能请使用桌面应用。
 
-## 本地 WeMM：使用 Conda
+## 本地 EmbeddingGemma 2：使用 Conda
 
 已有独立环境 `sortnest`，不会修改 base 环境。若在另一台电脑部署：
 
 ```powershell
 conda env create -f environment.yml
 conda activate sortnest
-python -s services/wemm_server.py --model-dir ./WeMM-Embedding-2B --device cpu
+python -s services/gemma_server.py --model-dir ./EmbeddingGemma-2 --device cpu
 ```
 
 也可使用 `./scripts/start-model.ps1`。`-s` 禁止加载用户级 Python 包，避免已有 Transformers / huggingface-hub 版本污染 Conda 环境。
 
-模型权重沿用当前目录中的 `WeMM-Embedding-2B`，不随安装包打包，也不会自动下载。服务只监听 `127.0.0.1:8787`，默认离线加载模型，不接受任意文件路径、浏览器跨域调用或非本机访问。
+权重放在 `EmbeddingGemma-2`（Hugging Face `google/embeddinggemma-2`），不随安装包打包，也不会在应用启动时自动下载。服务只监听 `127.0.0.1:8787`，默认离线加载模型，不接受任意文件路径、浏览器跨域调用或非本机访问。服务只加载文本和视觉编码器，不加载音频编码器。
 
-当前电脑为 4GB 显存，默认 CPU 推理；2B 模型 float32 约需要 11GB 权重内存，并有额外运行开销。启动加载期间请耐心等待终端显示 `Uvicorn running`。CUDA 仅在安装了支持 CUDA 的 PyTorch 且显存足够时使用 `--device cuda`；4GB 显存不推荐。
+默认 CPU 推理，float32。CUDA 在 GPU 支持时使用 bfloat16；不支持 bfloat16 时使用 float32。不要使用 float16，该精度会得到无效向量。文本加视觉大约 4.4 亿参数。启动加载期间请耐心等待终端显示 `Uvicorn running`。
 
 模型管理配置：
 
 | 字段 | 值 |
 |---|---|
-| 提供商 | 本地 WeMM |
+| 提供商 | 本地 EmbeddingGemma 2 |
 | Base URL | `http://127.0.0.1:8787` |
-| 模型名 | `WeMM-Embedding-2B` |
+| 模型名 | `EmbeddingGemma-2` |
 | API Key | 留空 |
 
-先运行「连接」测试（自动记录权重版本指纹），再运行「文本」「图片嵌入」测试。通过后，将同一配置分配给图片嵌入和文本查询任务。
+先运行「连接」测试（自动记录权重版本指纹），再运行「文本」「图片嵌入」测试。通过后，将同一配置分配给图片嵌入和文本查询任务。搜索词使用检索查询前缀，图片不加前缀，描述索引用文档前缀。输出为 768 维。旧的 WeMM 向量不会参与检索，需要重新建立图片向量和描述向量。
 
 ## 自定义图片理解
 
@@ -70,22 +70,22 @@ python -s services/wemm_server.py --model-dir ./WeMM-Embedding-2B --device cpu
 5. 图片向量建立后，可用中文语义搜索或以图搜图；也可不配置 AI，直接使用文件名/标签/描述关键词搜索和重复检测。
 6. 新增、修改、移动或删除图片后，点击重新扫描。未变化图片复用索引；已离线图片不计入有效库。
 
-**WeMM 只生成嵌入，不生成描述和标签。** 自动描述、分类和标签需要另配支持图片输入的 Ollama 或 OpenAI 兼容视觉模型。保存模型并不意味着能力已验证；必须实际通过对应测试。
+**EmbeddingGemma 2 只生成嵌入，不生成描述和标签。** 自动描述、分类和标签需要另配支持图片输入的 Ollama 或 OpenAI 兼容视觉模型。保存模型并不意味着能力已验证；必须实际通过对应测试。
 
-Ollama 图片嵌入使用新版 `/api/embed` 的 `input: {"image": "<base64>"}` 格式。服务版本和模型必须共同支持 media embeddings；文本嵌入通过、模型名称包含 WeMM、或支持图片对话，都不能代替图片嵌入测试。先运行「连接」记录模型 digest，再运行「文本」「图片嵌入」。服务返回 HTTP 501 时会提示当前模型不支持图片嵌入，不会将其标记为可用。标准 OpenAI `/embeddings` 仍按文本协议使用。
+Ollama 图片嵌入使用新版 `/api/embed` 的 `input: {"image": "<base64>"}` 格式。服务版本和模型必须共同支持 media embeddings；文本嵌入通过或支持图片对话，都不能代替图片嵌入测试。先运行「连接」记录模型 digest，再运行「文本」「图片嵌入」。服务返回 HTTP 501 时会提示当前模型不支持图片嵌入，不会将其标记为可用。标准 OpenAI `/embeddings` 仍按文本协议使用。
 
 ### 检索方式
 
 | 模式 | 实现与要求 |
 |---|---|
 | 关键词 | 文件名、标签、描述的 SQLite 匹配；不调用模型 |
-| 跨模态语义 | 使用通过文本及图片嵌入测试的同一 WeMM 或 Ollama 模型、服务、版本与匹配维度，余弦排序 |
+| 跨模态语义 | 使用通过文本及图片嵌入测试的同一 EmbeddingGemma 或 Ollama 模型、服务、版本与匹配维度，余弦排序 |
 | 描述语义 | 描述文本向量与查询文本来自同一嵌入模型；先生成描述，再建立描述索引 |
 | 图片向量检索 | 查询图片与图库使用同一模型配置，返回内容相关图片 |
 | 完全重复 | SHA-256 相同，表示文件字节完全相同 |
 | 视觉近似候选 | dHash 汉明距离 ≤ 12；不是经过校准的置信度，需人工核对 |
 
-相同向量维度不代表空间兼容。模型、地址或版本变化会使旧向量被排除；WeMM 在响应中核对权重版本，Ollama 在嵌入请求前核对 `/api/tags` 的 digest。版本变化后重新进行连接、能力测试和索引。对于 OpenAI 兼容 API 的可变模型别名，更新远端权重后请修改「模型版本 / 配置标识」。能力测试验证接口与向量有效性，检索效果仍需用实际图片和查询评估。
+相同向量维度不代表空间兼容。模型、地址或版本变化会使旧向量被排除；EmbeddingGemma 在响应中核对权重版本，Ollama 在嵌入请求前核对 `/api/tags` 的 digest。版本变化后重新进行连接、能力测试和索引。对于 OpenAI 兼容 API 的可变模型别名，更新远端权重后请修改「模型版本 / 配置标识」。能力测试验证接口与向量有效性，检索效果仍需用实际图片和查询评估。
 
 感知哈希不能可靠区分“压缩/缩放副本”与“构图接近”，应用明确标注为候选，不会自动删除图片。
 
@@ -97,8 +97,8 @@ Ollama 图片嵌入使用新版 `/api/embed` 的 `input: {"image": "<base64>"}` 
 - 同时只运行一个后台任务、一次解码和一次模型请求。扫描流式遍历，图片库每页 120 张并虚拟化显示。
 - 原图只读，移除目录只删除索引。界面中的分类、标签和模型删除需要确认。
 - API Key 使用 Windows 凭据管理器保存，不存 SQLite 或日志；界面只显示是否存在密钥。
-- Ollama 和 OpenAI 兼容服务支持 HTTP / HTTPS，可填写局域网 IP 或远程域名；非回环服务仍需勾选允许发送文本和图片内容，远程重定向禁用。本地 WeMM 适配器仅连接回环地址。
-- 缩略图及预览仅对已添加目录开放资产协议。上传模型的是后台生成的最大 1024px JPEG，不反复经前端传 Base64。
+- Ollama 和 OpenAI 兼容服务支持 HTTP / HTTPS，可填写局域网 IP 或远程域名；非回环服务仍需勾选允许发送文本和图片内容，远程重定向禁用。本地 EmbeddingGemma 适配器仅连接回环地址。
+- 缩略图及预览仅对已添加目录开放资产协议。上传模型的是后台生成的 JPEG，不反复经前端传 Base64。EmbeddingGemma 图片最长边 1024；Ollama 图片嵌入和图片理解最长边 256。
 - 目录预览授权在当前应用会话内保留，便于移除后重新添加；重启后仅恢复仍在索引中的目录授权。
 - EXIF 可关闭；关闭会立即移除已存 EXIF。原始图片本身仍可能带有 EXIF，但发送模型的 JPEG 会重新编码。
 - 单张图片解码限制为 256MB、最大边长 32768；超限及损坏文件单独记录错误。
@@ -113,10 +113,10 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
-真实 WeMM 端到端测试需先启动本地模型服务，并执行 `python -s scripts/prepare-fixtures.py` 下载三张公开图片：
+真实 EmbeddingGemma 端到端测试需先启动本地模型服务，并执行 `python -s scripts/prepare-fixtures.py` 下载三张公开图片：
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml real_wemm_end_to_end -- --ignored --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml real_gemma_end_to_end -- --ignored --nocapture
 ```
 
 测试数据单独存于 `artifacts/e2e-data`，不影响正式库；报告输出 `artifacts/e2e-report.json`。常规测试不依赖网络或真实模型。UI 不内置任何演示图片或虚假统计数据。
@@ -132,6 +132,6 @@ cargo test --manifest-path src-tauri/Cargo.toml real_wemm_end_to_end -- --ignore
 | `src-tauri/src/jobs.rs` | 任务队列、恢复、图片描述/分类/标签/向量持久化 |
 | `src-tauri/src/library.rs` | 分类标签、筛选、搜索、统计 |
 | `src/App.tsx`, `src/*.tsx` | 导航、图表、虚拟化网格、详情、管理页面 |
-| `services/wemm_server.py` | 可选本地 WeMM 推理服务 |
+| `services/gemma_server.py` | 可选本地 EmbeddingGemma 2 推理服务 |
 
 开发阶段记录、验收证据和限制见 [IMPLEMENTATION.md](IMPLEMENTATION.md)。

@@ -26,6 +26,23 @@ pub fn init(path: &Path) -> Result<()> {
             COMMIT;",
         )?;
     }
+    if version < 3 {
+        db.execute_batch(
+            "BEGIN IMMEDIATE;
+            UPDATE models
+            SET provider='embeddinggemma',
+                model='EmbeddingGemma-2',
+                name=CASE WHEN name IN ('本地 WeMM 2B','本地 WeMM') THEN '本地 EmbeddingGemma 2' ELSE name END,
+                revision='',
+                fingerprint='migrated-from-wemm',
+                capabilities='{}',
+                last_test=NULL,
+                test_result=NULL
+            WHERE provider='wemm';
+            PRAGMA user_version=3;
+            COMMIT;",
+        )?;
+    }
     db.execute("UPDATE jobs SET status='paused',message='应用重启，点击继续恢复任务' WHERE status IN ('running','queued')",[])?;
     Ok(())
 }
@@ -76,6 +93,33 @@ mod tests {
         assert_eq!(model["capabilities"], "{\"vision\":true}");
         assert_eq!(model["vision_prompt"], "");
         assert_eq!(model["vision_max_tokens"], 4096);
+    }
+    #[test]
+    fn replaces_saved_wemm_configuration_and_clears_its_capabilities() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("db");
+        let db = open(&path).unwrap();
+        db.execute_batch(include_str!("schema.sql")).unwrap();
+        db.execute("INSERT INTO models(id,name,provider,base_url,model,revision,fingerprint,capabilities) VALUES('local','本地 WeMM 2B','wemm','http://127.0.0.1:8787','WeMM-Embedding-2B','old-rev','old-fp','{\"image\":true,\"text\":true,\"image_dimension\":256}')", []).unwrap();
+        init(&path).unwrap();
+        init(&path).unwrap();
+        let model = rows(&open(&path).unwrap(), "SELECT * FROM models WHERE id='local'", [])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(model["provider"], "embeddinggemma");
+        assert_eq!(model["model"], "EmbeddingGemma-2");
+        assert_eq!(model["name"], "本地 EmbeddingGemma 2");
+        assert_eq!(model["revision"], "");
+        assert_eq!(model["capabilities"], "{}");
+        assert_eq!(model["fingerprint"], "migrated-from-wemm");
+        assert_eq!(
+            open(&path)
+                .unwrap()
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
     }
     #[test]
     fn migration_is_repeatable_and_recovers_jobs() {
